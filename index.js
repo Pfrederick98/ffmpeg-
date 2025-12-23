@@ -48,6 +48,11 @@ async function getFramerate(inputPath) {
 }
 
 app.post('/chunk', async (req, res) => {
+  console.log('=== REQUEST DEBUG ===');
+  console.log('Body:', JSON.stringify(req.body));
+  console.log('Headers:', req.headers);
+  console.log('===================');
+  
   try {
     const { video, chunkSize = 5 } = req.body;
     const timestamp = Date.now();
@@ -103,7 +108,9 @@ app.post('/chunk', async (req, res) => {
       });
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('ERROR:', err.message);
+    console.error('Stack:', err.stack);
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 

@@ -1,9 +1,12 @@
-FROM jrottenberg/ffmpeg:latest
-RUN apt-get update && apt-get install -y nodejs npm
+FROM node:18
+
+RUN apt-get update && apt-get install -y ffmpeg
+
 WORKDIR /app
-COPY package.json ./
+COPY package*.json ./
 RUN npm install
-COPY index.js ./
+COPY . ./
 RUN mkdir -p uploads chunks
+
 EXPOSE 8080
 CMD ["node", "index.js"]

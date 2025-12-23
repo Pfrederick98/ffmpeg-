@@ -45,6 +45,66 @@ async function getFramerate(inputPath) {
   }
 }
 
+// GET VIDEO DURATION (NEW ENDPOINT)
+app.post('/get-duration', async (req, res) => {
+  try {
+    const { video, chunkSize = 5 } = req.body;
+    
+    if (!video) {
+      return res.status(400).json({ error: 'video parameter required (URL or path)' });
+    }
+
+    const timestamp = Date.now();
+    let inputPath;
+    let shouldCleanup = false;
+
+    // Handle URL
+    if (video.startsWith('http')) {
+      console.log('📥 Downloading video for duration check...');
+      inputPath = `uploads/duration_check_${timestamp}.mp4`;
+      await downloadFile(video, inputPath);
+      shouldCleanup = true;
+    } 
+    // Handle file path
+    else {
+      inputPath = video;
+      if (!fs.existsSync(inputPath)) {
+        return res.status(400).json({ error: 'File not found' });
+      }
+    }
+
+    // Get duration using ffprobe
+    const durationCmd = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`;
+    const { stdout } = await execPromise(durationCmd);
+    const duration = parseFloat(stdout.trim());
+    
+    // Get framerate
+    const fps = await getFramerate(inputPath);
+    
+    // Calculate expected chunks
+    const expectedChunks = Math.ceil(duration / chunkSize);
+    
+    // Cleanup if downloaded
+    if (shouldCleanup && fs.existsSync(inputPath)) {
+      fs.unlinkSync(inputPath);
+    }
+    
+    console.log(`📊 Duration: ${duration.toFixed(2)}s, Expected chunks: ${expectedChunks}`);
+    
+    res.json({
+      success: true,
+      duration: duration,
+      fps: fps,
+      chunkSize: chunkSize,
+      expectedChunks: expectedChunks
+    });
+    
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // CHUNK ENDPOINT
 app.post('/chunk', async (req, res) => {
   try {
@@ -119,7 +179,7 @@ app.post('/chunk', async (req, res) => {
   }
 });
 
-// STITCH ENDPOINT
+// STITCH ENDPOINT (with URL support)
 app.post('/stitch', async (req, res) => {
   try {
     const { chunks } = req.body;
@@ -128,19 +188,29 @@ app.post('/stitch', async (req, res) => {
       return res.status(400).json({ error: 'chunks array required' });
     }
 
-    // Verify all chunks exist
-    for (const chunk of chunks) {
-      if (!fs.existsSync(chunk)) {
+    const timestamp = Date.now();
+    const downloadedChunks = [];
+    
+    // Download all URL chunks to temp files
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      
+      if (chunk.startsWith('http')) {
+        console.log(`📥 Downloading chunk ${i + 1}/${chunks.length}...`);
+        const tempPath = `uploads/temp_chunk_${timestamp}_${i}.mp4`;
+        await downloadFile(chunk, tempPath);
+        downloadedChunks.push(tempPath);
+      } else if (fs.existsSync(chunk)) {
+        downloadedChunks.push(chunk);
+      } else {
         return res.status(400).json({ error: `Chunk not found: ${chunk}` });
       }
     }
 
-    const timestamp = Date.now();
     const listFile = `uploads/filelist_${timestamp}.txt`;
     const outputFile = `output/stitched_${timestamp}.mp4`;
 
-    // Create concat demuxer file
-    const fileList = chunks.map(c => `file '../${c}'`).join('\n');
+    const fileList = downloadedChunks.map(c => `file '../${c}'`).join('\n');
     fs.writeFileSync(listFile, fileList);
 
     console.log(`🔗 Stitching ${chunks.length} chunks...`);
@@ -148,7 +218,11 @@ app.post('/stitch', async (req, res) => {
     const cmd = `ffmpeg -f concat -safe 0 -i "${listFile}" -c copy "${outputFile}"`;
     
     exec(cmd, (error, stdout, stderr) => {
+      // Cleanup
       fs.unlinkSync(listFile);
+      downloadedChunks.forEach(c => {
+        if (c.startsWith('uploads/temp_chunk_')) fs.unlinkSync(c);
+      });
       
       if (error) {
         console.error('❌ Stitch Error:', stderr);
@@ -170,7 +244,7 @@ app.post('/stitch', async (req, res) => {
   }
 });
 
-// DOWNLOAD STITCHED VIDEO AS BASE64
+// STITCH TO BASE64 (with URL support)
 app.post('/stitch-base64', async (req, res) => {
   try {
     const { chunks } = req.body;
@@ -180,10 +254,27 @@ app.post('/stitch-base64', async (req, res) => {
     }
 
     const timestamp = Date.now();
+    const downloadedChunks = [];
+    
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      
+      if (chunk.startsWith('http')) {
+        console.log(`📥 Downloading chunk ${i + 1}/${chunks.length}...`);
+        const tempPath = `uploads/temp_chunk_${timestamp}_${i}.mp4`;
+        await downloadFile(chunk, tempPath);
+        downloadedChunks.push(tempPath);
+      } else if (fs.existsSync(chunk)) {
+        downloadedChunks.push(chunk);
+      } else {
+        return res.status(400).json({ error: `Chunk not found: ${chunk}` });
+      }
+    }
+
     const listFile = `uploads/filelist_${timestamp}.txt`;
     const outputFile = `output/stitched_${timestamp}.mp4`;
 
-    const fileList = chunks.map(c => `file '../${c}'`).join('\n');
+    const fileList = downloadedChunks.map(c => `file '../${c}'`).join('\n');
     fs.writeFileSync(listFile, fileList);
 
     console.log(`🔗 Stitching to base64...`);
@@ -191,18 +282,20 @@ app.post('/stitch-base64', async (req, res) => {
     const cmd = `ffmpeg -f concat -safe 0 -i "${listFile}" -c copy "${outputFile}"`;
     
     exec(cmd, (error, stdout, stderr) => {
+      // Cleanup temp files
       fs.unlinkSync(listFile);
+      downloadedChunks.forEach(c => {
+        if (c.startsWith('uploads/temp_chunk_')) fs.unlinkSync(c);
+      });
       
       if (error) {
         console.error('❌ Stitch Error:', stderr);
         return res.status(500).json({ error: 'Stitching failed', details: stderr });
       }
       
-      // Read file as base64
       const videoBuffer = fs.readFileSync(outputFile);
       const base64Video = videoBuffer.toString('base64');
       
-      // Optional: cleanup output file
       fs.unlinkSync(outputFile);
       
       console.log('✅ Stitched to base64');
@@ -224,6 +317,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'online',
     endpoints: {
+      getDuration: 'POST /get-duration - Get video duration and expected chunks',
       chunk: 'POST /chunk - Split video into chunks',
       stitch: 'POST /stitch - Combine chunks back together',
       stitchBase64: 'POST /stitch-base64 - Stitch and return as base64'
@@ -235,6 +329,7 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ FFmpeg API running on port ${PORT}`);
   console.log(`📍 Endpoints:`);
+  console.log(`   POST /get-duration - Get video info`);
   console.log(`   POST /chunk - Chunk videos`);
   console.log(`   POST /stitch - Stitch chunks (returns URL)`);
   console.log(`   POST /stitch-base64 - Stitch chunks (returns base64)`);

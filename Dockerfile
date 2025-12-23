@@ -1,16 +1,9 @@
 FROM jrottenberg/ffmpeg:latest
-
-RUN apt-get update && apt-get install -y nodejs npm curl
-
+RUN apt-get update && apt-get install -y nodejs npm
 WORKDIR /app
-
-COPY package.json package-lock.json ./
+COPY package.json ./
 RUN npm install
-
-COPY server.js ./
-
+COPY index.js ./
 RUN mkdir -p uploads chunks
-
 EXPOSE 8080
-
-CMD ["node", "server.js"]
+CMD ["node", "index.js"]
